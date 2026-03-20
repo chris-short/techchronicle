@@ -1,0 +1,95 @@
+name: Publish TechChronicle to Buttondown
+
+on:
+  # Trigger when a new newsletter markdown is pushed to newsletters/
+  push:
+    paths:
+      - 'newsletters/*.md'
+    branches:
+      - main
+
+  # Manual trigger — optionally specify a file path
+  workflow_dispatch:
+    inputs:
+      file:
+        description: 'Path to newsletter .md file (default: latest in newsletters/)'
+        required: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Find the newsletter file
+        id: find
+        run: |
+          if [ -n "${{ github.event.inputs.file }}" ]; then
+            FILE="${{ github.event.inputs.file }}"
+          else
+            # Most recently modified .md in newsletters/
+            FILE=$(ls -t newsletters/*.md 2>/dev/null | head -1)
+          fi
+
+          if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
+            echo "::error::No newsletter file found."
+            exit 1
+          fi
+
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+          echo "Found newsletter: $FILE"
+
+      - name: Publish to Buttondown
+        env:
+          BUTTONDOWN_TOKEN: ${{ secrets.BUTTONDOWN_API_TOKEN }}
+          FILE: ${{ steps.find.outputs.file }}
+        run: |
+          python3 << 'PYEOF'
+          import json, urllib.request, re, sys, os
+
+          token = os.environ["BUTTONDOWN_TOKEN"]
+          filepath = os.environ["FILE"]
+
+          with open(filepath, "r") as f:
+              body = f.read()
+
+          # Extract the first H1 heading as the subject line
+          match = re.search(r"^# (.+)$", body, re.MULTILINE)
+          if match:
+              subject = match.group(1).strip()
+          else:
+              subject = "TechChronicle"
+
+          print(f"Subject: {subject}")
+          print(f"File:    {filepath}")
+          print(f"Body:    {len(body)} chars")
+
+          payload = json.dumps({
+              "subject": subject,
+              "body": body,
+              "status": "about_to_send"
+          })
+
+          req = urllib.request.Request(
+              "https://api.buttondown.email/v1/emails",
+              data=payload.encode("utf-8"),
+              headers={
+                  "Authorization": f"Token {token}",
+                  "Content-Type": "application/json"
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  result = json.loads(resp.read().decode("utf-8"))
+                  print(f"Published successfully!")
+                  print(f"  Email ID: {result.get('id')}")
+                  print(f"  Status:   {result.get('status')}")
+          except urllib.error.HTTPError as e:
+              err = e.read().decode("utf-8")
+              print(f"::error::Buttondown API returned {e.code}: {err}")
+              sys.exit(1)
+          PYEOF
